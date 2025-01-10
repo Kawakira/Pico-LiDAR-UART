@@ -14,38 +14,82 @@
 int num = 0;
 int Rx_Busy = 0;
 int sum = 0;
-int PAYLOAD_LENG = 5;
+int AnswerLeng = 5;
 uint8_t temp;
 uint8_t data[512];
-uint8_t command[9] = {0xA5,0xA5,0xA5,0xA5,0x00,0x63,0x00,0x00,0x63};
 uint8_t payload[327];
 int payload_index = 0;
 
 uint32_t header_buf = 0;
 bool header_detected = false;
+bool IsScanning = false;
+
+typedef enum
+{
+    GetAddr,
+    GetParam,
+    GetVersion,
+    StartScan,
+    StopScan,
+    Restart,
+    SetBaud,
+    SetEdge
+}CommandNum;
+
+typedef struct
+{
+    int command;
+    int answer_length;
+}Command;
 
 void on_uart_rx() {
     while (uart_is_readable(UART_ID)) {
         temp = uart_getc(UART_ID);
-        //data[num++] = temp;
-        if(Rx_Busy < 2){
         header_buf = (header_buf << 8) | temp;
-            if(header_detected){
-                payload[payload_index++] = temp;
-                if(payload_index >= PAYLOAD_LENG){
-                    header_detected = false;
-                    header_buf = 0;
-                    PAYLOAD_LENG = 327;
-                    Rx_Busy++;
+        if(header_detected){
+            payload[payload_index++] = temp;
+            if(payload_index >= AnswerLeng){
+                header_detected = false;
+                header_buf = 0;
+                if(IsScanning){
+                    AnswerLeng = 327;
+                    IsScanning = false;
                 }
+                Rx_Busy--;
             }
-            if(!header_detected && header_buf == HEADER){
-                header_detected = true;
-                payload_index = 0;
+        }
+        if(!header_detected && header_buf == HEADER){
+            header_detected = true;
+            payload_index = 0;
+            if(AnswerLeng == 0){
+                IsScanning = true;
+                AnswerLeng = 5;
+                Rx_Busy = 2;
+            }else{
+                Rx_Busy = 1;
             }
         }
     }
 }
+
+void LiDAR(Command command){
+    int RxData[9] = {0xA5,0xA5,0xA5,0xA5,0x00,0x00,0x00,0x00,0x00};
+    RxData[5] = command.command;
+    RxData[8] = command.command;
+    AnswerLeng = command.answer_length;
+    uart_write_blocking(UART_ID, (const uint8_t *)RxData, 9);
+}
+
+Command CommandList[] = {
+    {0x60,5},
+    {0x61,14},
+    {0x62,24},
+    {0x63,0},
+    {0x64,5},
+    {0x67,5},
+    {0x68,6},
+    {0x69,6}
+};
 
 int main(void) {
     //To use USB
@@ -66,13 +110,11 @@ int main(void) {
     gpio_init(25);
     gpio_set_dir(25, GPIO_OUT);
     gpio_put(25,true);
-    sleep_ms(5000);
-    uart_write_blocking(UART_ID, (const uint8_t *)command, 9);
-    sleep_ms(2000);
+    sleep_ms(1000);
     //Loop
     while (true)
     {
-        if(Rx_Busy == 2){
+        if(Rx_Busy == 0){
             for(int i=3;i<163;i++){
                 data[i-3] = ((payload[i*2+1] << 8) | payload[i*2]) & 0x1ff;
                 printf("%d ",data[i-3]);
@@ -86,30 +128,8 @@ int main(void) {
                 printf("←Fucked Up");
             }
             printf("%d\n\n",sum);
-            Rx_Busy = 1;
+            Rx_Busy = 0;
             sum = 0;
         }
-        //Blink green LED
-        /*if(num>0){
-            printf("Get:");
-            int i=0;
-            sum = 0;
-            while(num > 0){
-                printf("%d ",data[i]);
-                sum += data[i];
-                num--;
-                i++;
-            }
-            sum -= 165 * 4;
-            sum -= data[i-1];
-            if(sum % 256 == data[i-1]){
-                printf("←OK?");
-            }else{
-                printf("←Fucked Up");
-            }
-            printf("\n");
-            num = 0;
-            sleep_ms(100);
-        }*/
     }
 }
