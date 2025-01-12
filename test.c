@@ -9,15 +9,17 @@
 #define UART0_TX    (0)
 #define UART0_RX    (1)
 #define HEADER 0xA5A5A5A5
-//#define PAYLOAD_LENG 5
+#define BUF_SIZE 1024
 
-int num = 0;
-int Rx_Busy = 0;
-int sum = 0;
+volatile int Rx_write_index = 0;
+volatile int Rx_read_index = 0;
+int Rx_Busy = 1;
+int checksum = 0;
 int AnswerLeng = 5;
 uint8_t temp;
-uint8_t data[512];
-uint8_t payload[327];
+uint8_t Data[512];
+volatile uint8_t RxBuf[BUF_SIZE];
+uint8_t payload[BUF_SIZE];
 int payload_index = 0;
 
 uint32_t header_buf = 0;
@@ -42,42 +44,61 @@ typedef struct
     int answer_length;
 }Command;
 
+void enqueue(uint8_t byte){
+    RxBuf[Rx_write_index] = byte;
+    Rx_write_index = (Rx_write_index + 1) % BUF_SIZE;
+}
+
+int dequeue(uint8_t *byte){
+    if (Rx_read_index == Rx_write_index) {
+        return 0;
+    }
+    *byte = RxBuf[Rx_read_index];
+    Rx_read_index = (Rx_read_index + 1) % BUF_SIZE;
+    return 1;
+}
+
 void on_uart_rx() {
     while (uart_is_readable(UART_ID)) {
-        temp = uart_getc(UART_ID);
-        header_buf = (header_buf << 8) | temp;
-        if(header_detected){
-            payload[payload_index++] = temp;
-            if(payload_index >= AnswerLeng){
-                header_detected = false;
-                header_buf = 0;
-                if(IsScanning){
-                    AnswerLeng = 327;
-                    IsScanning = false;
-                }
-                Rx_Busy--;
-            }
-        }
-        if(!header_detected && header_buf == HEADER){
-            header_detected = true;
-            payload_index = 0;
-            if(AnswerLeng == 0){
-                IsScanning = true;
-                AnswerLeng = 5;
-                Rx_Busy = 2;
-            }else{
-                Rx_Busy = 1;
-            }
-        }
+        enqueue(uart_getc(UART_ID));
     }
 }
 
 void LiDAR(Command command){
-    int RxData[9] = {0xA5,0xA5,0xA5,0xA5,0x00,0x00,0x00,0x00,0x00};
-    RxData[5] = command.command;
-    RxData[8] = command.command;
+    uint8_t TxData[9] = {0xA5,0xA5,0xA5,0xA5,0x00,0x00,0x00,0x00,0x00};
+    TxData[5] = command.command;
+    TxData[8] = command.command;
     AnswerLeng = command.answer_length;
-    uart_write_blocking(UART_ID, (const uint8_t *)RxData, 9);
+    uart_write_blocking(UART_ID, (const uint8_t *)TxData, 9);
+}
+
+void Process_rx_data() {
+    uint8_t byte;
+    while (dequeue(&byte)) {
+        if(Rx_Busy == 0){
+            header_buf = (header_buf << 8) | byte;
+            if (header_detected) {
+                payload[payload_index++] = byte;
+                if (payload_index >= AnswerLeng) {
+                    header_detected = false;
+                    header_buf = 0;
+                    if (IsScanning) {
+                        AnswerLeng = 327;
+                        IsScanning = false;
+                    }
+                    Rx_Busy = 1;
+                }
+            }
+            if (!header_detected && header_buf == HEADER) {
+                header_detected = true;
+                payload_index = 0;
+                if (AnswerLeng == 0) {
+                    IsScanning = true;
+                    AnswerLeng = 5;
+                }
+            }
+        }
+    }
 }
 
 Command CommandList[] = {
@@ -110,26 +131,33 @@ int main(void) {
     gpio_init(25);
     gpio_set_dir(25, GPIO_OUT);
     gpio_put(25,true);
-    sleep_ms(1000);
+    sleep_ms(2000);
+    LiDAR(CommandList[StartScan]);
     //Loop
     while (true)
     {
-        if(Rx_Busy == 0){
-            for(int i=3;i<163;i++){
-                data[i-3] = ((payload[i*2+1] << 8) | payload[i*2]) & 0x1ff;
-                printf("%d ",data[i-3]);
+        Process_rx_data();
+        if(Rx_Busy == 1) {
+            checksum = 0;
+            for (int i=0;i<80;i++) {
+                Data[i] = ((payload[i*2+167] << 8) | payload[i*2+166]) & 0x1ff;
             }
-            for(int i=0;i<327;i++){
-                sum += payload[i];
+            for (int i=0;i<80;i++) {
+                Data[i+80] = ((payload[i*2+7] << 8) | payload[i*2+6]) & 0x1ff;
             }
-            if((sum - payload[326]) % 256 == payload[326]){
-                printf("←OK?");
+            for(int i=0;i<160;i++){
+                printf("%d ",Data[i]);
+            }
+            printf("\n");
+            for(int i=0;i<326;i++){
+                checksum += payload[i];
+            }
+            if(checksum % 256 == payload[326]){
+                printf("Ok\n");
             }else{
-                printf("←Fucked Up");
+                printf("Fucked Up\n");
             }
-            printf("%d\n\n",sum);
             Rx_Busy = 0;
-            sum = 0;
         }
     }
 }
